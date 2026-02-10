@@ -14,6 +14,7 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use alloc::collections::BTreeMap;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
@@ -51,10 +52,12 @@ lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
+        // 使用 from_fn 初始化数组，因为 BTreeMap 不支持 Copy
+        let mut tasks: [TaskControlBlock; MAX_APP_NUM] = core::array::from_fn(|_| TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+            syscall_times: BTreeMap::new(),  // 使用空的 BTreeMap
+        });
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
@@ -168,4 +171,20 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// 更新当前任务的系统调用计数 (使用 BTreeMap)
+pub fn update_syscall_times(syscall_id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    // entry API: 如果 key 不存在则插入 0，然后 +1
+    *inner.tasks[current].syscall_times.entry(syscall_id).or_insert(0) += 1;
+}
+
+/// 获取当前任务某个系统调用的调用次数 (使用 BTreeMap)
+pub fn get_syscall_times(syscall_id: usize) -> u32 {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    // 如果 key 不存在返回 0，否则返回对应的值
+    *inner.tasks[current].syscall_times.get(&syscall_id).unwrap_or(&0)
 }
