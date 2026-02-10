@@ -9,7 +9,12 @@ pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
-/// A simple FIFO scheduler.
+/// A large constant used in stride scheduling.
+///
+/// Choose a value large enough to reduce division error, but small enough to avoid overflow.
+pub const BIG_STRIDE: u64 = 10_000;
+
+/// A simple stride scheduler (linear scan).
 impl TaskManager {
     ///Creat an empty TaskManager
     pub fn new() -> Self {
@@ -23,7 +28,32 @@ impl TaskManager {
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        if self.ready_queue.is_empty() {
+            return None;
+        }
+
+        // Find the runnable task with minimal stride.
+        let mut min_idx = 0usize;
+        let mut min_stride = {
+            let inner = self.ready_queue[0].inner_exclusive_access();
+            inner.stride
+        };
+        for (i, t) in self.ready_queue.iter().enumerate().skip(1) {
+            let inner = t.inner_exclusive_access();
+            let s = inner.stride;
+            if s < min_stride {
+                min_stride = s;
+                min_idx = i;
+            }
+        }
+
+        let task = self.ready_queue.remove(min_idx).unwrap();
+        // After selecting it to run, add its stride by pass.
+        {
+            let mut inner = task.inner_exclusive_access();
+            inner.stride = inner.stride.wrapping_add(inner.pass);
+        }
+        Some(task)
     }
 }
 

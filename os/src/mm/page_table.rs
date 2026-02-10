@@ -185,20 +185,21 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
 
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
 pub fn translated_str(token: usize, ptr: *const u8) -> String {
-    let page_table = PageTable::from_token(token);
     let mut string = String::new();
     let mut va = ptr as usize;
+    let page_table = PageTable::from_token(token);
     loop {
-        let ch: u8 = *(page_table
-            .translate_va(VirtAddr::from(va))
-            .unwrap()
-            .get_mut());
+        // 逐字节通过页表读取，直到遇到 '\0'
+        let pa = match page_table.translate_va(VirtAddr::from(va)) {
+            Some(v) => v,
+            None => break,
+        };
+        let ch = unsafe { *(usize::from(pa) as *const u8) };
         if ch == 0 {
             break;
-        } else {
-            string.push(ch as char);
-            va += 1;
         }
+        string.push(ch as char);
+        va += 1;
     }
     string
 }

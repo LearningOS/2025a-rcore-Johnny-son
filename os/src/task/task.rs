@@ -68,6 +68,13 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Stride scheduling: priority (>= 2)
+    pub priority: usize,
+    /// Stride scheduling: current stride
+    pub stride: u64,
+    /// Stride scheduling: pass = BIG_STRIDE / priority
+    pub pass: u64,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +125,12 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+
+                    // stride scheduling defaults
+                    priority: 16,
+                    stride: 0,
+                    // BIG_STRIDE is re-exported in task mod
+                    pass: crate::task::BIG_STRIDE / 16,
                 })
             },
         };
@@ -150,6 +163,12 @@ impl TaskControlBlock {
         inner.trap_cx_ppn = trap_cx_ppn;
         // initialize base_size
         inner.base_size = user_sp;
+
+        // keep stride scheduling fields as-is (same PID), but ensure pass is consistent
+        if inner.priority < 2 {
+            inner.priority = 16;
+        }
+    inner.pass = crate::task::BIG_STRIDE / inner.priority as u64;
         // initialize trap_cx
         let trap_cx = inner.get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
@@ -191,6 +210,11 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+
+                    // stride scheduling: inherit parent's priority; new process starts from stride 0
+                    priority: parent_inner.priority,
+                    stride: 0,
+                    pass: crate::task::BIG_STRIDE / parent_inner.priority as u64,
                 })
             },
         });

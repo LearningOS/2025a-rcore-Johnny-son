@@ -72,6 +72,104 @@ impl MemorySet {
             self.areas.remove(idx);
         }
     }
+
+    /// Check whether [start_va, end_va) overlaps with existing areas.
+    pub fn is_range_free(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start = start_va.floor();
+        let end = end_va.ceil();
+        for area in self.areas.iter() {
+            let a0 = area.vpn_range.get_start();
+            let a1 = area.vpn_range.get_end();
+            if !(end <= a0 || start >= a1) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Map a new framed area for mmap.
+    pub fn mmap_area(&mut self, start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) -> bool {
+        if !self.is_range_free(start_va, end_va) {
+            return false;
+        }
+        self.insert_framed_area(start_va, end_va, perm);
+        true
+    }
+
+    /// Unmap a range: support full cover, shrink on one side, or split an area into two.
+    pub fn munmap_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        if start_vpn >= end_vpn {
+            return false;
+        }
+
+        let mut new_areas: Vec<MapArea> = Vec::new();
+        let mut changed = false;
+
+        for mut area in self.areas.drain(..) {
+            let a0 = area.vpn_range.get_start();
+            let a1 = area.vpn_range.get_end();
+            if end_vpn <= a0 || start_vpn >= a1 {
+                // no overlap
+                new_areas.push(area);
+                continue;
+            }
+            changed = true;
+
+            // overlap exists. We need to keep the remaining parts.
+            if start_vpn <= a0 && end_vpn >= a1 {
+                // fully covered: unmap whole area
+                area.unmap(&mut self.page_table);
+                continue;
+            }
+
+            if start_vpn <= a0 && end_vpn < a1 {
+                // cut left part
+                for vpn in VPNRange::new(a0, end_vpn) {
+                    area.unmap_one(&mut self.page_table, vpn);
+                }
+                area.vpn_range = VPNRange::new(end_vpn, a1);
+                new_areas.push(area);
+                continue;
+            }
+
+            if start_vpn > a0 && end_vpn >= a1 {
+                // cut right part
+                for vpn in VPNRange::new(start_vpn, a1) {
+                    area.unmap_one(&mut self.page_table, vpn);
+                }
+                area.vpn_range = VPNRange::new(a0, start_vpn);
+                new_areas.push(area);
+                continue;
+            }
+
+            // split into two parts: [a0, start_vpn) and [end_vpn, a1)
+            // We must NOT allocate new frames; just keep remaining mappings.
+            for vpn in VPNRange::new(start_vpn, end_vpn) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+            let mut left = MapArea::from_another(&area);
+            left.vpn_range = VPNRange::new(a0, start_vpn);
+            let mut right = MapArea::from_another(&area);
+            right.vpn_range = VPNRange::new(end_vpn, a1);
+            // keep data_frames for framed areas
+            if area.map_type == MapType::Framed {
+                for (vpn, frame) in area.data_frames.into_iter() {
+                    if vpn < start_vpn {
+                        left.data_frames.insert(vpn, frame);
+                    } else if vpn >= end_vpn {
+                        right.data_frames.insert(vpn, frame);
+                    }
+                }
+            }
+            new_areas.push(left);
+            new_areas.push(right);
+        }
+
+        self.areas = new_areas;
+        changed
+    }
     /// Add a new MapArea into this MemorySet.
     /// Assuming that there are no conflicts in the virtual address
     /// space.
