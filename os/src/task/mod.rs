@@ -202,3 +202,39 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
+
+/// Map a new area into current task's address space.
+pub fn current_mmap(start: crate::mm::VirtAddr, end: crate::mm::VirtAddr, perm: crate::mm::MapPermission) -> bool {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let cur = inner.current_task;
+    inner.tasks[cur].memory_set.mmap_area(start, end, perm)
+}
+
+/// Unmap an area from current task's address space.
+pub fn current_munmap(start: crate::mm::VirtAddr, end: crate::mm::VirtAddr) -> bool {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let cur = inner.current_task;
+    inner.tasks[cur].memory_set.munmap_area(start, end)
+}
+
+/// Increment current task's syscall counter.
+pub fn update_syscall_times(syscall_id: usize) {
+    use crate::config::MAX_SYSCALL_NUM;
+    if syscall_id >= MAX_SYSCALL_NUM {
+        return;
+    }
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let cur = inner.current_task;
+    inner.tasks[cur].syscall_times[syscall_id] += 1;
+}
+
+/// Get current task's syscall counter value.
+pub fn get_syscall_times(syscall_id: usize) -> u32 {
+    use crate::config::MAX_SYSCALL_NUM;
+    if syscall_id >= MAX_SYSCALL_NUM {
+        return 0;
+    }
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let cur = inner.current_task;
+    inner.tasks[cur].syscall_times[syscall_id]
+}

@@ -63,6 +63,86 @@ impl MemorySet {
             None,
         );
     }
+
+    /// Check whether [start, end) (in VPN) overlaps with any existing area.
+    pub fn is_range_free(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+        self.areas.iter().all(|area| {
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
+            end_vpn <= a_start || start_vpn >= a_end
+        })
+    }
+
+    /// Map a new framed area into this address space. Return false if overlaps.
+    pub fn mmap_area(&mut self, start: VirtAddr, end: VirtAddr, perm: MapPermission) -> bool {
+        if start >= end {
+            return false;
+        }
+        if !self.is_range_free(start, end) {
+            return false;
+        }
+        self.push(MapArea::new(start, end, MapType::Framed, perm), None);
+        true
+    }
+
+    /// Unmap range [start, end) from this address space.
+    /// Support partial unmap by shrinking/splitting areas.
+    pub fn munmap_area(&mut self, start: VirtAddr, end: VirtAddr) -> bool {
+        if start >= end {
+            return false;
+        }
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+
+        let mut i = 0usize;
+        let mut touched = false;
+        while i < self.areas.len() {
+            // SAFETY: we don't hold references across potential push/remove.
+            let a_start = self.areas[i].vpn_range.get_start();
+            let a_end = self.areas[i].vpn_range.get_end();
+            if end_vpn <= a_start || start_vpn >= a_end {
+                i += 1;
+                continue;
+            }
+            touched = true;
+            // Now overlap exists.
+            if start_vpn <= a_start && end_vpn >= a_end {
+                // remove whole area
+                let mut area = self.areas.remove(i);
+                area.unmap(&mut self.page_table);
+                continue;
+            }
+            if start_vpn <= a_start && end_vpn < a_end {
+                // shrink from left (move start forward)
+                self.areas[i].shrink_left(&mut self.page_table, end_vpn);
+                i += 1;
+                continue;
+            }
+            if start_vpn > a_start && end_vpn >= a_end {
+                // shrink from right
+                self.areas[i].shrink_to(&mut self.page_table, start_vpn);
+                i += 1;
+                continue;
+            }
+            // split into two areas: [a_start, start_vpn) and [end_vpn, a_end)
+            let right_start = end_vpn;
+            let right_end = a_end;
+            let right_map_type = self.areas[i].map_type;
+            let right_map_perm = self.areas[i].map_perm;
+            // left part shrink
+            self.areas[i].shrink_to(&mut self.page_table, start_vpn);
+            // create right part and map
+            let r_start_va: VirtAddr = right_start.into();
+            let r_end_va: VirtAddr = right_end.into();
+            let mut right = MapArea::new(r_start_va, r_end_va, right_map_type, right_map_perm);
+            right.map(&mut self.page_table);
+            self.areas.push(right);
+            i += 1;
+        }
+        touched
+    }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
@@ -326,6 +406,14 @@ impl MapArea {
             self.unmap_one(page_table, vpn)
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
+    }
+
+    /// Shrink this area by moving its start to new_start (unmap left part).
+    pub fn shrink_left(&mut self, page_table: &mut PageTable, new_start: VirtPageNum) {
+        for vpn in VPNRange::new(self.vpn_range.get_start(), new_start) {
+            self.unmap_one(page_table, vpn)
+        }
+        self.vpn_range = VPNRange::new(new_start, self.vpn_range.get_end());
     }
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {

@@ -1,6 +1,7 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::config::PAGE_SIZE;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -155,6 +156,64 @@ impl PageTable {
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
+
+    /// Translate a virtual address to (physical page number, page offset, pte flags)
+    /// Return None if the mapping does not exist.
+    pub fn translate_va(&self, va: VirtAddr) -> Option<(PhysPageNum, usize, PTEFlags)> {
+        let vpn = va.floor();
+        let offset = va.page_offset();
+        self.translate(vpn)
+            .map(|pte| (pte.ppn(), offset, pte.flags()))
+    }
+}
+
+/// Read a byte from user virtual address with permission check.
+pub fn translated_read_u8(token: usize, ptr: *const u8) -> Option<u8> {
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(ptr as usize);
+    let (ppn, off, flags) = page_table.translate_va(va)?;
+    if !flags.contains(PTEFlags::U) || !flags.contains(PTEFlags::R) {
+        return None;
+    }
+    Some(ppn.get_bytes_array()[off])
+}
+
+/// Write a byte to user virtual address with permission check.
+pub fn translated_write_u8(token: usize, ptr: *mut u8, val: u8) -> Result<(), ()> {
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(ptr as usize);
+    let (ppn, off, flags) = page_table.translate_va(va).ok_or(())?;
+    if !flags.contains(PTEFlags::U) || !flags.contains(PTEFlags::W) {
+        return Err(());
+    }
+    ppn.get_bytes_array()[off] = val;
+    Ok(())
+}
+
+/// Copy bytes from kernel buffer to user virtual memory with permission check (U|W per page).
+pub fn copy_to_user(token: usize, dst: *mut u8, src: &[u8]) -> Result<(), ()> {
+    let page_table = PageTable::from_token(token);
+    let mut start = dst as usize;
+    let end = start + src.len();
+    let mut copied = 0usize;
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let vpn = start_va.floor();
+        let pte = page_table.translate(vpn).ok_or(())?;
+        let flags = pte.flags();
+        if !flags.contains(PTEFlags::U) || !flags.contains(PTEFlags::W) {
+            return Err(());
+        }
+        let ppn = pte.ppn();
+        let page_off = start_va.page_offset();
+    let page_left = PAGE_SIZE - page_off;
+        let to_copy = (end - start).min(page_left);
+    let dst_slice = &mut ppn.get_bytes_array()[page_off..page_off + to_copy];
+        dst_slice.copy_from_slice(&src[copied..copied + to_copy]);
+        start += to_copy;
+        copied += to_copy;
+    }
+    Ok(())
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
